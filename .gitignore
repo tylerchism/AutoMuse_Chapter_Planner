@@ -5,3 +5,5 @@ summaries/*
 chat_logs/*
 scratchpad.txt
 debug/*
+nexus/*
+.env

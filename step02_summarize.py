@@ -5,6 +5,7 @@ import json
 #from numpy.linalg import norm
 import re
 from time import time,sleep
+from dotenv import load_dotenv
 #from uuid import uuid4
 #import datetime
 
@@ -41,7 +42,8 @@ def chatgpt_completion(messages, temp=0, model="gpt-4"):
 
 
 if __name__ == "__main__":
-    openai.api_key = open_file('key_openai.txt')
+    load_dotenv()
+    openai.api_key = os.environ.get("OPENAI_API_KEY")
     chapters_dir = "chapters_txt"
     summaries_dir = "summaries"
 

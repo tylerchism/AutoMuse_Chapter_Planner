@@ -4,12 +4,16 @@ import json
 import openai
 import tkinter as tk
 from time import time, sleep
+from uuid import uuid4
+import datetime
 from threading import Thread
 from tkinter import ttk, scrolledtext
+import pinecone
+from dotenv import load_dotenv
 
 
 ##### simple helper functions
-
+payload = []
 
 def open_file(filepath):
     with open(filepath, 'r', encoding='utf-8', errors='ignore') as infile:
@@ -30,9 +34,15 @@ def save_json(filepath, payload):
     with open(filepath, 'w', encoding='utf-8') as outfile:
         json.dump(payload, outfile, ensure_ascii=False, sort_keys=True, indent=2)
 
+def timestamp_to_datetime(unix_time):
+    return datetime.datetime.fromtimestamp(unix_time).strftime("%A, %B %d, %Y at %I:%M%p %Z")
 
-##### OpenAI functions
 
+def gpt3_embedding(content, engine='text-embedding-ada-002'):
+    content = content.encode(encoding='ASCII',errors='ignore').decode()  # fix any UNICODE errors
+    response = openai.Embedding.create(input=content,engine=engine)
+    vector = response['data'][0]['embedding']  # this is a normal list
+    return vector
 
 def chatgpt_completion(messages, model="gpt-4"):
     max_retry = 7
@@ -58,9 +68,32 @@ def chatgpt_completion(messages, model="gpt-4"):
             print(f'Error communicating with OpenAI: "{oops}" - Retrying in {2 ** (retry - 1) * 5} seconds...')
             sleep(2 ** (retry - 1) * 5)
 
+def load_conversation(results):
+    result = list()
+    for m in results['matches']:
+        info = load_json('nexus/%s.json' % m['id'])
+        result.append(info)
+    ordered = sorted(result, key=lambda d: d['time'], reverse=False)  # sort them all chronologically
+    messages = [i['message'] for i in ordered]
+    return '\n'.join(messages).strip()
 
-####### TKINTER functions 
 
+def search_conversation(message, convo_length=30):
+    global payload
+    # Reset payload to an empty list each time this function is called
+    payload = list()
+
+    timestamp = time()
+    timestring = timestamp_to_datetime(timestamp)
+
+    vector = gpt3_embedding(message)
+    unique_id = str(uuid4())
+    metadata = {'speaker': 'USER', 'time': timestamp, 'message': message, 'timestring': timestring, 'uuid': unique_id}
+    save_json('nexus/%s.json' % unique_id, metadata)
+    payload.append((unique_id, vector))
+    #### search for relevant messages, and generate a response
+    results = vdb.query(vector=vector, top_k=convo_length)
+    return load_conversation(results) # results should be a DICT with 'matches' which is a LIST of DICTS, with 'id'
 
 def send_message(event=None):
     user_input = user_entry.get("1.0", tk.END).strip()
@@ -78,6 +111,9 @@ def send_message(event=None):
     user_entry.config(state='disabled')
     send_button.config(state='disabled')
 
+    context = search_conversation(user_input, convo_length=convo_length)
+    system_message = open_file('default_system_tmp.txt').replace('<<CONVERSATION>>', context)
+    conversation[0] = {'role': 'system', 'content': system_message}
 
     conversation.append({'role': 'user', 'content': user_input})
     filename = 'chat_%s_user.txt' % time()
@@ -93,11 +129,26 @@ def send_message(event=None):
 
 
 def get_ai_response():
+    global payload
+
     response = chatgpt_completion(conversation)
     conversation.append({'role': 'assistant', 'content': response})
     # save debug
     filename = 'debug/log_%s_main.json' % time()
     save_json(filename, conversation)
+
+    # Generate a new vector for the assistant's response
+    vector = gpt3_embedding(response)
+    timestamp = time()
+    timestring = timestamp_to_datetime(timestamp)
+    unique_id = str(uuid4())
+    # Create metadata for the assistant's response
+    metadata = {'speaker': 'MUSE', 'time': timestamp, 'message': response, 'timestring': timestring, 'uuid': unique_id}
+    save_json('nexus/%s.json' % unique_id, metadata)
+    # Append the new vector and unique_id to the payload
+    payload.append((unique_id, vector))
+    # Upsert the payload to Pinecone
+    vdb.upsert(payload)
 
     def update_chat_text():
         chat_text.config(state='normal')
@@ -119,9 +170,14 @@ def on_return_key(event):
 
 
 if __name__ == "__main__":
-    openai.api_key = open_file('key_openai.txt')
+    load_dotenv()
+    convo_length = 30
+    openai.api_key = os.environ.get("OPENAI_API_KEY")
+    pinecone.init(api_key=os.environ['PINECONE_API_KEY'], environment='us-west4-gcp-free')
+    vdb = pinecone.Index("personal-bot")
     scratchpad = open_file('scratchpad.txt')
     system_message = open_file('default_system.txt').replace('<<INPUT>>', scratchpad)
+    save_file('default_system_tmp.txt', system_message)
     conversation = list()
     conversation.append({'role': 'system', 'content': system_message})
 
